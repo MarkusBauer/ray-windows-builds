@@ -12,7 +12,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$HERE/.." && pwd)"
+ROOT_DIR="$(cd "${RAY_ROOT:-$HERE/..}" && pwd)"
 
 cd "$ROOT_DIR/python"
 

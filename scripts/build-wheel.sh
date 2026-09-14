@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build a Ray wheel natively on Windows, without the internal CI docker image.
 #
-# Run from an *elevated* Git Bash on the Windows machine:
-#     FIX_SYMLINKS=1 SKIP_DASHBOARD=1 PY=3.13 bash my_windows_build/build-wheel.sh
+# Run from an *elevated* Git Bash on the Windows machine, with this directory
+# copied into (or RAY_ROOT pointed at) a Ray checkout:
+#     FIX_SYMLINKS=1 SKIP_DASHBOARD=1 PY=3.13 bash scripts/build-wheel.sh
 #
 # Mirrors python/build-wheel-windows.sh minus the Buildkite-only bits (remote
 # bazel cache, destructive `git clean`, S3 upload) and minus the ray-cpp pass,
@@ -10,6 +11,8 @@
 #
 # Environment:
 #   PY=3.13            target Python version (uv downloads it)
+#   RAY_ROOT=...       the Ray checkout to build (default: parent of this dir)
+#   OUT_DIR=...        where the finished wheel is copied (default: ./out)
 #   SKIP_DASHBOARD=1   skip the React frontend build; drops the Node.js
 #                      prerequisite. Serve still works -- on Windows a missing
 #                      client/build is downgraded to a warning, see
@@ -43,8 +46,9 @@ BUILD_ATTEMPTS="${BUILD_ATTEMPTS:-3}"
 SKIP_BAZEL_SHUTDOWN="${SKIP_BAZEL_SHUTDOWN:-0}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$HERE/.." && pwd)"
-OUT_DIR="$HERE/out"
+ROOT_DIR="$(cd "${RAY_ROOT:-$HERE/..}" && pwd)"
+OUT_DIR="${OUT_DIR:-$HERE/out}"
+export RAY_ROOT="$ROOT_DIR"   # picked up by _build_inner.sh
 
 log() { echo "==> $*"; }
 
@@ -61,7 +65,7 @@ if [[ "$SKIP_DASHBOARD" != "1" ]] && ! command -v npm >/dev/null 2>&1; then
   missing=1
 fi
 if [[ "$missing" != "0" ]]; then
-  echo "See my_windows_build/README.md for prerequisites." >&2
+  echo "See scripts/README.md for prerequisites." >&2
   exit 1
 fi
 
@@ -73,6 +77,11 @@ if [[ ! -f "$BAZEL_SH" ]]; then
 fi
 log "BAZEL_SH=$BAZEL_SH"
 log "target Python: $PY"
+log "ray checkout: $ROOT_DIR"
+if [[ ! -f "$ROOT_DIR/python/setup.py" ]]; then
+  echo "ERROR: $ROOT_DIR does not look like a Ray checkout (no python/setup.py)" >&2
+  exit 1
+fi
 
 # --- symlink preflight --------------------------------------------------
 # Bazel builds the runfiles tree for every host tool out of real symlinks

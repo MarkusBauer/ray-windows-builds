@@ -1,0 +1,206 @@
+name: Build Ray wheel (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ray_version:
+        description: "Ray version, e.g. 2.57.0"
+        required: true
+        type: string
+      python_version:
+        description: "CPython version, e.g. 3.13"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# One build per release tag at a time.
+concurrency:
+  group: build-${{ inputs.ray_version }}-py${{ inputs.python_version }}
+  cancel-in-progress: false
+
+env:
+  RAY_VERSION: ${{ inputs.ray_version }}
+  PY_VERSION: ${{ inputs.python_version }}
+  RELEASE_TAG: ${{ inputs.ray_version }}-py${{ inputs.python_version }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # Cold builds compile Ray's C++ core from scratch on a 4-core runner.
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          [[ "$RAY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-z0-9]+)?$ ]] \
+            || { echo "::error::ray_version must look like 2.57.0, got '$RAY_VERSION'"; exit 1; }
+          [[ "$PY_VERSION" =~ ^3\.[0-9]+$ ]] \
+            || { echo "::error::python_version must look like 3.13, got '$PY_VERSION'"; exit 1; }
+          echo "PY_TAG=cp${PY_VERSION//./}" >> "$GITHUB_ENV"
+          echo "Building Ray $RAY_VERSION for CPython $PY_VERSION -> release $RELEASE_TAG"
+
+      - name: Fail if release already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists. Delete it (and its tag) first to rebuild."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $RELEASE_TAG already exists. Delete it first to rebuild."
+            exit 1
+          fi
+
+      - name: Check out build scripts
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          git --version
+          bazel --version || true   # bazelisk; the real Bazel comes from Ray's .bazelversion
+          uv --version
+          curl --version | head -1
+          ls "/c/Program Files/Git/usr/bin/bash.exe"
+          echo "--- disk ---"
+          df -h /c /d 2>/dev/null || df -h
+
+      - name: Clone Ray ${{ env.RAY_VERSION }}
+        run: |
+          set -euo pipefail
+          # core.symlinks: the runner is elevated, so git can materialize Ray's
+          # tracked symlinks directly (build-wheel.sh re-checks them anyway).
+          # core.autocrlf=false: bazel/genrule shell scripts must stay LF.
+          git clone --depth 1 --branch "ray-$RAY_VERSION" \
+            -c core.symlinks=true -c core.autocrlf=false \
+            https://github.com/ray-project/ray.git ray
+          echo "RAY_COMMIT=$(git -C ray rev-parse HEAD)" >> "$GITHUB_ENV"
+          git -C ray log -1 --oneline
+
+      # Best-effort Bazel caches. The disk cache lets a second Python version
+      # of the same Ray release reuse nearly all compiled C++; the repository
+      # cache avoids re-downloading (and GitHub rate-limiting) the archives.
+      - name: Restore Bazel caches
+        id: bazel-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            C:\bazel-disk-cache
+            C:\bazel-repo-cache
+          key: bazel-${{ env.RAY_VERSION }}-py${{ env.PY_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-${{ env.RAY_VERSION }}-py${{ env.PY_VERSION }}-
+            bazel-${{ env.RAY_VERSION }}-
+            bazel-
+
+      - name: Build wheel
+        env:
+          PY: ${{ env.PY_VERSION }}
+          RAY_ROOT: ${{ github.workspace }}/ray
+          OUT_DIR: ${{ github.workspace }}/out
+          FIX_SYMLINKS: "1"
+          SKIP_DASHBOARD: "1"
+          BUILD_ATTEMPTS: "3"
+          BAZEL_ARGS: "--disk_cache=C:/bazel-disk-cache --repository_cache=C:/bazel-repo-cache"
+        run: |
+          set -euo pipefail
+          bash scripts/build-wheel.sh
+
+      - name: Save Bazel caches
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            C:\bazel-disk-cache
+            C:\bazel-repo-cache
+          key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
+
+      - name: Verify wheel
+        run: |
+          set -euo pipefail
+          WHEEL="out/ray-${RAY_VERSION}-${PY_TAG}-${PY_TAG}-win_amd64.whl"
+          [[ -f "$WHEEL" ]] || { echo "::error::expected $WHEEL, found:"; ls -l out; exit 1; }
+          echo "WHEEL=$WHEEL" >> "$GITHUB_ENV"
+          uv run --no-project --no-config --python "$PY_VERSION" python - "$WHEEL" "$PY_TAG" <<'PYEOF'
+          import sys, zipfile
+          whl, tag = sys.argv[1], sys.argv[2]
+          z = zipfile.ZipFile(whl)
+          n = z.namelist()
+          distinfo = [x for x in n if x.startswith("ray-") and x.endswith(".dist-info/WHEEL")]
+          assert len(distinfo) == 1, distinfo
+          wheel_meta = z.read(distinfo[0]).decode()
+          print(wheel_meta)
+          ok = True
+          def check(cond, msg):
+              global ok
+              print(("ok   " if cond else "FAIL ") + msg)
+              ok &= bool(cond)
+          check(f"Tag: {tag}-{tag}-win_amd64" in wheel_meta, f"tag {tag}-{tag}-win_amd64")
+          check("Root-Is-Purelib: false" in wheel_meta, "Root-Is-Purelib: false")
+          for p in ["ray/_raylet.pyd", "ray/core/src/ray/raylet/raylet.exe"]:
+              check(p in n, p)
+          for pre, minimum in [("ray/rllib/", 500), ("ray/serve/", 100)]:
+              cnt = sum(1 for x in n if x.startswith(pre))
+              check(cnt >= minimum, f"{pre} entries: {cnt} (>= {minimum})")
+          dlls = [x for x in n if x.lower().endswith(".dll")]
+          check(any("msvcp140" in d.lower() for d in dlls), f"delvewheel-bundled DLLs: {dlls}")
+          sys.exit(0 if ok else 1)
+          PYEOF
+          sha256sum "$WHEEL" | tee out/SHA256SUMS
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ray-${{ env.RAY_VERSION }}-${{ env.PY_TAG }}-win_amd64
+          path: |
+            out/ray-*.whl
+            out/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          WHEEL_NAME="$(basename "$WHEEL")"
+          SHA="$(cut -d' ' -f1 out/SHA256SUMS)"
+          cat > release-notes.md <<MD
+          Ray **${RAY_VERSION}** for **CPython ${PY_VERSION}**, Windows x86-64, built natively from
+          [ray-project/ray@${RAY_COMMIT:0:12}](https://github.com/ray-project/ray/commit/${RAY_COMMIT}) (tag \`ray-${RAY_VERSION}\`).
+
+          | | |
+          | --- | --- |
+          | Wheel | \`${WHEEL_NAME}\` |
+          | SHA-256 | \`${SHA}\` |
+          | Dashboard web UI | not included (\`SKIP_DASHBOARD=1\`; Ray Serve and the dashboard HTTP API still work) |
+          | Built by | [workflow run #${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |
+
+          Install:
+
+          \`\`\`
+          pip install "ray[serve] @ ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${WHEEL_NAME}"
+          \`\`\`
+
+          This configuration (Windows + Serve) is not tested by Ray upstream. Smoke-test before relying on it.
+          MD
+          cat release-notes.md
+          { echo "## $RELEASE_TAG"; echo; cat release-notes.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create tag and release ${{ env.RELEASE_TAG }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Ray ${{ env.RAY_VERSION }} for Python ${{ env.PY_VERSION }} (Windows x64)
+          body_path: release-notes.md
+          files: |
+            out/ray-*.whl
+            out/SHA256SUMS
+          fail_on_unmatched_files: true

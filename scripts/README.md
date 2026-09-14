@@ -4,8 +4,8 @@
 
 ```bash
 # ELEVATED Git Bash (right-click → Run as administrator), from the repo root:
-FIX_SYMLINKS=1 SKIP_DASHBOARD=1 PY=3.13 bash my_windows_build/build-wheel.sh
-# → my_windows_build/out/ray-2.57.0-cp313-cp313-win_amd64.whl
+FIX_SYMLINKS=1 SKIP_DASHBOARD=1 PY=3.13 bash scripts/build-wheel.sh
+# → scripts/out/ray-2.57.0-cp313-cp313-win_amd64.whl
 ```
 
 That is the exact command that produced the verified wheel. Elevation is not
@@ -100,13 +100,13 @@ before.
 From the repository root, in **Git Bash** (elevated, per the section above):
 
 ```bash
-FIX_SYMLINKS=1 SKIP_DASHBOARD=1 PY=3.13 bash my_windows_build/build-wheel.sh
+FIX_SYMLINKS=1 SKIP_DASHBOARD=1 PY=3.13 bash scripts/build-wheel.sh
 ```
 
 Expect a long run — this compiles Ray's C++ core from scratch. On a warm
 Bazel cache the observed end-to-end time was roughly 15 minutes.
 
-The finished wheel lands in `my_windows_build/out/`.
+The finished wheel lands in `scripts/out/`.
 
 ### Verifying the result
 
@@ -115,7 +115,7 @@ still exits 0, just without RLlib. Check the artifact itself:
 
 ```bash
 python -c "
-import zipfile; z=zipfile.ZipFile('my_windows_build/out/ray-2.57.0-cp313-cp313-win_amd64.whl')
+import zipfile; z=zipfile.ZipFile('scripts/out/ray-2.57.0-cp313-cp313-win_amd64.whl')
 n=z.namelist(); print(z.read('ray-2.57.0.dist-info/WHEEL').decode())
 for p in ['ray/_raylet.pyd','ray/core/src/ray/raylet/raylet.exe']: print(p, p in n)
 for pre in ['ray/rllib/','ray/serve/']: print(pre, sum(1 for x in n if x.startswith(pre)))
@@ -197,7 +197,7 @@ the dashboard **web UI**.
 Drop the variable to build the UI too:
 
 ```bash
-PY=3.13 bash my_windows_build/build-wheel.sh
+PY=3.13 bash scripts/build-wheel.sh
 ```
 
 ## 3. Install
@@ -206,7 +206,7 @@ PY=3.13 bash my_windows_build/build-wheel.sh
 wheel (`python/setup.py:238`). Install the extra against the local file:
 
 ```bash
-pip install "ray[serve] @ file:///C:/path/to/my_windows_build/out/ray-2.57.0-cp313-cp313-win_amd64.whl"
+pip install "ray[serve] @ file:///C:/path/to/scripts/out/ray-2.57.0-cp313-cp313-win_amd64.whl"
 ```
 
 The `build-wheel.sh` output prints this line with the real path filled in.
